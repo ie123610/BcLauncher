@@ -16,7 +16,7 @@
 using json = nlohmann::json;
 
 // 全局版本号定义
-const wchar_t* HOST_VERSION = L"1.1.1";
+const wchar_t* HOST_VERSION = L"1.1.2";
 
 // 日志功能控制开关（true 开，false 关）
 const bool ENABLE_LOGGING = false;
