@@ -16,10 +16,10 @@
 using json = nlohmann::json;
 
 // 全局版本号定义
-const wchar_t* HOST_VERSION = L"1.1.2";
+const wchar_t* HOST_VERSION = L"1.1.3";
 
 // 日志功能控制开关（true 开，false 关）
-const bool ENABLE_LOGGING = false;
+const bool ENABLE_LOGGING = true;
 
 // 官方预设默认扩展名列表（当 XML 节点缺失或文件不存在时使用）
 const std::string DEFAULT_EXT_LIST = ".torrent;.metalink;.mp4;.mkv;.asf;.avi;.mpg;.rm;.rmvb;.wmv;.mp3;.wma;.zip;.rar;.7z;.iso;.exe;.msi;.msix";
@@ -203,22 +203,21 @@ LaunchResult LaunchProtocolDirectly(const std::string& bcUrl) {
 
     // 判读是“普通启动”还是“带下载参数启动”
     if (bcUrl.empty() || bcUrl == "bc://") {
-        // 普通启动：仅运行主程序路径，不传递 /url 参数
+        // 普通启动：仅运行主程序路径，不传递 --url 参数
         fullCommandLine = L"\"" + exePath + L"\"";
     }
     else {
-        // 带参数启动：使用输入的 URL 替换模板中的 %1
+        // 带参数启动：使用 --url="bc://..." --tray 格式
         int urlLen = MultiByteToWideChar(CP_ACP, 0, bcUrl.c_str(), -1, NULL, 0);
         std::wstring wBcUrl(urlLen, L'\0');
         MultiByteToWideChar(CP_ACP, 0, bcUrl.c_str(), -1, &wBcUrl[0], urlLen);
 
-        size_t pos = templateStr.find(L"%1");
-        if (pos != std::wstring::npos) {
-            fullCommandLine = templateStr.replace(pos, 2, wBcUrl.c_str());
+        // 去除字符串尾部的多余 \0
+        if (!wBcUrl.empty() && wBcUrl.back() == L'\0') {
+            wBcUrl.pop_back();
         }
-        else {
-            fullCommandLine = templateStr + L" \"" + wBcUrl.c_str() + L"\"";
-        }
+
+        fullCommandLine = L"\"" + exePath + L"\" --url=\"" + wBcUrl + L"\" --tray";
     }
 
     WriteLog("拼接后的最终命令行: " + WStringToString(fullCommandLine));
