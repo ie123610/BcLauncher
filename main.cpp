@@ -16,13 +16,13 @@
 using json = nlohmann::json;
 
 // 全局版本号定义
-const wchar_t* HOST_VERSION = L"1.1.3";
+const wchar_t* HOST_VERSION = L"1.1.8";
 
 // 日志功能控制开关（true 开，false 关）
 const bool ENABLE_LOGGING = true;
 
 // 官方预设默认扩展名列表（当 XML 节点缺失或文件不存在时使用）
-const std::string DEFAULT_EXT_LIST = ".torrent;.metalink;.mp4;.mkv;.asf;.avi;.mpg;.rm;.rmvb;.wmv;.mp3;.wma;.zip;.rar;.7z;.iso;.exe;.msi;.msix";
+const std::string DEFAULT_EXT_LIST = ".mp4;.mkv;.asf;.avi;.mpg;.rm;.rmvb;.wmv;.mp3;.wma;.zip;.rar;.7z;.iso;.exe;.msi;.msix";
 
 // 错误码定义
 enum LaunchResult {
