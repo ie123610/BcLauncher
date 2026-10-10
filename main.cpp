@@ -89,7 +89,7 @@ bool IsLoggingEnabled() {
 void WriteLog(const std::string& logMsg) {
     if (!IsLoggingEnabled()) return;
 
-    std::ofstream logFile("native_host_debug.log", std::ios::app);
+    std::ofstream logFile("BcLauncher_debug.log", std::ios::app);
     if (logFile.is_open()) {
         auto now = std::chrono::system_clock::now();
         auto in_time_t = std::chrono::system_clock::to_time_t(now);
