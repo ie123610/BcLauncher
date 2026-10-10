@@ -6,6 +6,7 @@
 #include <sstream>
 #include <fstream>
 #include <chrono>
+#include <vector>
 #include <io.h>
 #include <fcntl.h>
 #include <windows.h>
@@ -16,10 +17,7 @@
 using json = nlohmann::json;
 
 // 全局版本号定义
-const wchar_t* HOST_VERSION = L"1.1.8";
-
-// 日志功能控制开关（true 开，false 关）
-const bool ENABLE_LOGGING = true;
+const wchar_t* HOST_VERSION = L"1.2.7";
 
 // 官方预设默认扩展名列表（当 XML 节点缺失或文件不存在时使用）
 const std::string DEFAULT_EXT_LIST = ".mp4;.mkv;.asf;.avi;.mpg;.rm;.rmvb;.wmv;.mp3;.wma;.zip;.rar;.7z;.iso;.exe;.msi;.msix";
@@ -31,6 +29,38 @@ enum LaunchResult {
     LAUNCH_ERR_CREATE_PROCESS = 2
 };
 
+// RAII 结构：用于安全管理 WOW64 文件系统重定向的禁用与恢复
+class ScopedWow64DisableRedirection {
+public:
+    ScopedWow64DisableRedirection() : disabled(false), oldVal(NULL) {
+        HMODULE hKernel = GetModuleHandleW(L"kernel32.dll");
+        if (hKernel) {
+            typedef BOOL(WINAPI* LPFN_Disable)(PVOID*);
+            LPFN_Disable pfnDisable = (LPFN_Disable)GetProcAddress(hKernel, "Wow64DisableWow64FsRedirection");
+            if (pfnDisable) {
+                disabled = pfnDisable(&oldVal);
+            }
+        }
+    }
+
+    ~ScopedWow64DisableRedirection() {
+        if (disabled) {
+            HMODULE hKernel = GetModuleHandleW(L"kernel32.dll");
+            if (hKernel) {
+                typedef BOOL(WINAPI* LPFN_Revert)(PVOID);
+                LPFN_Revert pfnRevert = (LPFN_Revert)GetProcAddress(hKernel, "Wow64RevertWow64FsRedirection");
+                if (pfnRevert) {
+                    pfnRevert(oldVal);
+                }
+            }
+        }
+    }
+
+private:
+    BOOL disabled;
+    PVOID oldVal;
+};
+
 // 辅助函数：将 wstring 转换为 string (UTF-8/ANSI)
 std::string WStringToString(const std::wstring& wstr) {
     if (wstr.empty()) return "";
@@ -40,9 +70,24 @@ std::string WStringToString(const std::wstring& wstr) {
     return strTo;
 }
 
-// 日志记录函数
+// 动态读取 exe 同级目录下的 ini 控制日志开关
+bool IsLoggingEnabled() {
+    wchar_t modulePath[MAX_PATH] = { 0 };
+    if (GetModuleFileNameW(NULL, modulePath, MAX_PATH) > 0) {
+        std::wstring exeDir(modulePath);
+        size_t lastSlash = exeDir.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos) {
+            std::wstring iniPath = exeDir.substr(0, lastSlash + 1) + L"BcLauncher.ini";
+            UINT enableLog = GetPrivateProfileIntW(L"Logging", L"EnableLog", 0, iniPath.c_str());
+            return enableLog != 0;
+        }
+    }
+    return false;
+}
+
+// 日志记录函数（基于 INI 配置动态开辟）
 void WriteLog(const std::string& logMsg) {
-    if (!ENABLE_LOGGING) return;
+    if (!IsLoggingEnabled()) return;
 
     std::ofstream logFile("native_host_debug.log", std::ios::app);
     if (logFile.is_open()) {
@@ -57,6 +102,59 @@ void WriteLog(const std::string& logMsg) {
     }
 }
 
+// 辅助函数：安全获取系统环境变量值，未找到则返回默认值
+std::wstring GetSystemEnvVar(const wchar_t* varName, const wchar_t* defaultValue) {
+    wchar_t buf[32767] = { 0 };
+    DWORD ret = GetEnvironmentVariableW(varName, buf, 32767);
+    if (ret > 0 && ret < 32767) {
+        return std::wstring(buf);
+    }
+    return std::wstring(defaultValue);
+}
+
+// 构造独立且完全隔绝父进程污染的 Unicode 环境变量块
+std::vector<wchar_t> CreateCleanEnvironmentBlock() {
+    std::vector<std::wstring> envVars;
+
+    std::wstring sysRoot = GetSystemEnvVar(L"SystemRoot", L"C:\\WINDOWS");
+    std::wstring sysDrive = GetSystemEnvVar(L"SystemDrive", L"C:");
+    std::wstring comSpec = GetSystemEnvVar(L"ComSpec", L"C:\\WINDOWS\\system32\\cmd.exe");
+
+    envVars.push_back(L"SystemRoot=" + sysRoot);
+    envVars.push_back(L"SystemDrive=" + sysDrive);
+    envVars.push_back(L"ComSpec=" + comSpec);
+    envVars.push_back(L"PROCESSOR_ARCHITECTURE=AMD64");
+
+    std::wstring cleanPath = sysRoot + L"\\system32;" + sysRoot + L";" + sysRoot + L"\\System32\\Wbem;" + sysRoot + L"\\System32\\WindowsPowerShell\\v1.0\\";
+    envVars.push_back(L"Path=" + cleanPath);
+    envVars.push_back(L"PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC");
+
+    std::wstring appData = GetSystemEnvVar(L"APPDATA", L"");
+    std::wstring localAppData = GetSystemEnvVar(L"LOCALAPPDATA", L"");
+    std::wstring userProfile = GetSystemEnvVar(L"USERPROFILE", L"");
+    std::wstring programData = GetSystemEnvVar(L"ProgramData", L"C:\\ProgramData");
+    std::wstring tempDir = GetSystemEnvVar(L"TEMP", L"");
+    std::wstring tmpDir = GetSystemEnvVar(L"TMP", L"");
+
+    if (!appData.empty())      envVars.push_back(L"APPDATA=" + appData);
+    if (!localAppData.empty()) envVars.push_back(L"LOCALAPPDATA=" + localAppData);
+    if (!userProfile.empty())  envVars.push_back(L"USERPROFILE=" + userProfile);
+    if (!programData.empty())  envVars.push_back(L"ProgramData=" + programData);
+    if (!tempDir.empty())      envVars.push_back(L"TEMP=" + tempDir);
+    if (!tmpDir.empty())       envVars.push_back(L"TMP=" + tmpDir);
+
+    envVars.push_back(L"OS=Windows_NT");
+
+    std::vector<wchar_t> block;
+    for (const auto& var : envVars) {
+        block.insert(block.end(), var.begin(), var.end());
+        block.push_back(L'\0');
+    }
+    block.push_back(L'\0');
+
+    return block;
+}
+
 // =========================================================
 // 定位 BitComet.xml 并提取扩展名列表
 // =========================================================
@@ -64,16 +162,16 @@ std::string GetBitCometExtensionList() {
     WriteLog("--- 开始查找 BitComet 配置文件 ---");
     std::wstring xmlPath = L"";
 
-    // 1. 尝试检查便携模式路径（代理程序位于 \BitComet\tools\ 下，上一级目录即为主程序目录）
+    // 1. 检查便携模式路径
     wchar_t modulePath[MAX_PATH] = { 0 };
     if (GetModuleFileNameW(NULL, modulePath, MAX_PATH) > 0) {
         std::wstring currentExeDir(modulePath);
         size_t lastSlash = currentExeDir.find_last_of(L"\\/");
         if (lastSlash != std::wstring::npos) {
-            std::wstring toolsDir = currentExeDir.substr(0, lastSlash); // ...\BitComet\tools
+            std::wstring toolsDir = currentExeDir.substr(0, lastSlash);
             size_t secondLastSlash = toolsDir.find_last_of(L"\\/");
             if (secondLastSlash != std::wstring::npos) {
-                std::wstring portableXml = toolsDir.substr(0, secondLastSlash + 1) + L"BitComet.xml"; // ...\BitComet\BitComet.xml
+                std::wstring portableXml = toolsDir.substr(0, secondLastSlash + 1) + L"BitComet.xml";
                 WriteLog("检测便携版配置文件路径: " + WStringToString(portableXml));
                 if (GetFileAttributesW(portableXml.c_str()) != INVALID_FILE_ATTRIBUTES) {
                     xmlPath = portableXml;
@@ -83,7 +181,7 @@ std::string GetBitCometExtensionList() {
         }
     }
 
-    // 2. 若便携版未找到，尝试检查安装版 AppData 路径 (%APPDATA%\BitComet\BitComet.xml)
+    // 2. 检查安装版 AppData 路径
     if (xmlPath.empty()) {
         wchar_t appDataPath[MAX_PATH] = { 0 };
         if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appDataPath))) {
@@ -96,13 +194,13 @@ std::string GetBitCometExtensionList() {
         }
     }
 
-    // 3. 配置文件均未找到，回退到默认列表
+    // 3. 退回默认列表
     if (xmlPath.empty()) {
         WriteLog("[警告] 未能找到任何 BitComet.xml 配置文件，退回默认扩展名列表。");
         return DEFAULT_EXT_LIST;
     }
 
-    // 4. 打开并解析 XML 文件中的 <HttpDownloadIEMonitorFileType> 节点
+    // 4. 读取 XML 文件内容
     std::ifstream xmlFile(xmlPath);
     if (!xmlFile.is_open()) {
         WriteLog("[错误] 无法打开配置文件: " + WStringToString(xmlPath) + "，退回默认扩展名列表。");
@@ -117,7 +215,7 @@ std::string GetBitCometExtensionList() {
 
     size_t startPos = content.find(startTag);
     if (startPos == std::string::npos) {
-        WriteLog("[提示] XML 文件中缺少 <HttpDownloadIEMonitorFileType> 节点（用户未曾修改过），退回默认扩展名列表。");
+        WriteLog("[提示] XML 文件中缺少 <HttpDownloadIEMonitorFileType> 节点，退回默认扩展名列表。");
         return DEFAULT_EXT_LIST;
     }
 
@@ -125,13 +223,11 @@ std::string GetBitCometExtensionList() {
     size_t endPos = content.find(endTag, startPos);
 
     if (endPos == std::string::npos) {
-        WriteLog("[错误] XML 格式异常，未找到匹配的闭合标签 </HttpDownloadIEMonitorFileType>，退回默认扩展名列表。");
+        WriteLog("[错误] XML 格式异常，未找到闭合标签，退回默认扩展名列表。");
         return DEFAULT_EXT_LIST;
     }
 
     std::string extList = content.substr(startPos, endPos - startPos);
-
-    // 去除两端可能包含的空白字符
     extList.erase(0, extList.find_first_not_of(" \t\r\n"));
     extList.erase(extList.find_last_not_of(" \t\r\n") + 1);
 
@@ -163,17 +259,14 @@ LaunchResult LaunchProtocolDirectly(const std::string& bcUrl) {
     LONG res = RegQueryValueExW(hKey, NULL, NULL, &type, (LPBYTE)cmdTemplate, &bufSize);
     RegCloseKey(hKey);
 
-    // 严谨校验：如果读取失败，或者读取出的模板为空，均视为注册表项无效
     if (res != ERROR_SUCCESS || bufSize <= sizeof(wchar_t) || cmdTemplate[0] == L'\0') {
-        WriteLog("[错误] 读取注册表默认键值失败或读取结果为空！res: " + std::to_string(res) + ", bufSize: " + std::to_string(bufSize));
+        WriteLog("[错误] 读取注册表默认键值失败或读取结果为空！");
         return LAUNCH_ERR_REGISTRY;
     }
 
     WriteLog("成功读取注册表命令模板: " + WStringToString(cmdTemplate));
 
     std::wstring templateStr(cmdTemplate);
-
-    // 从命令模板中提取真正的 Exe 路径
     std::wstring exePath;
     if (!templateStr.empty() && templateStr[0] == L'\"') {
         size_t secondQuote = templateStr.find(L'\"', 1);
@@ -193,26 +286,29 @@ LaunchResult LaunchProtocolDirectly(const std::string& bcUrl) {
 
     WriteLog("解析出的比特彗星 Exe 路径: " + WStringToString(exePath));
 
-    // 预先校验 Exe 文件是否存在
     if (!exePath.empty() && GetFileAttributesW(exePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         WriteLog("[错误] 指定的 Exe 文件不存在或无法访问！路径: " + WStringToString(exePath));
         return LAUNCH_ERR_CREATE_PROCESS;
     }
 
-    std::wstring fullCommandLine;
+    // 提取比特彗星 Exe 所在的主目录作为工作目录
+    std::wstring workingDir;
+    if (!exePath.empty()) {
+        size_t lastDirSlash = exePath.find_last_of(L"\\/");
+        if (lastDirSlash != std::wstring::npos) {
+            workingDir = exePath.substr(0, lastDirSlash);
+        }
+    }
 
-    // 判读是“普通启动”还是“带下载参数启动”
+    std::wstring fullCommandLine;
     if (bcUrl.empty() || bcUrl == "bc://") {
-        // 普通启动：仅运行主程序路径，不传递 --url 参数
         fullCommandLine = L"\"" + exePath + L"\"";
     }
     else {
-        // 带参数启动：使用 --url="bc://..." --tray 格式
         int urlLen = MultiByteToWideChar(CP_ACP, 0, bcUrl.c_str(), -1, NULL, 0);
         std::wstring wBcUrl(urlLen, L'\0');
         MultiByteToWideChar(CP_ACP, 0, bcUrl.c_str(), -1, &wBcUrl[0], urlLen);
 
-        // 去除字符串尾部的多余 \0
         if (!wBcUrl.empty() && wBcUrl.back() == L'\0') {
             wBcUrl.pop_back();
         }
@@ -229,17 +325,29 @@ LaunchResult LaunchProtocolDirectly(const std::string& bcUrl) {
 
     wchar_t* cmdBuffer = &fullCommandLine[0];
     const wchar_t* appName = exePath.empty() ? NULL : exePath.c_str();
+    const wchar_t* curDir = workingDir.empty() ? NULL : workingDir.c_str();
 
-    // 正确传入 ExePath 与 完整命令行
-    BOOL success = CreateProcessW(
-        appName,
-        cmdBuffer,
-        NULL, NULL,
-        FALSE,
-        0,
-        NULL, NULL,
-        &si, &pi
-    );
+    // 构造隔离的环境变量块，并增加脱离 Job Object 限制的标志
+    std::vector<wchar_t> cleanEnvBlock = CreateCleanEnvironmentBlock();
+    DWORD creationFlags = DETACHED_PROCESS | CREATE_UNICODE_ENVIRONMENT | CREATE_BREAKAWAY_FROM_JOB;
+
+    BOOL success = FALSE;
+
+    // 唤起进程时临时解除 WOW64 重定向
+    {
+        ScopedWow64DisableRedirection wow64Scope;
+
+        success = CreateProcessW(
+            appName,
+            cmdBuffer,
+            NULL, NULL,
+            FALSE,                 // 禁用句柄继承
+            creationFlags,         // 脱离父进程管道/控制台/Job树，并使用 Unicode 环境
+            cleanEnvBlock.data(),  // 传入干净的系统环境变量
+            curDir,                // 设置正确的根工作目录
+            &si, &pi
+        );
+    }
 
     if (success != FALSE) {
         WriteLog("[成功] CreateProcessW 调用成功，进程已启动！PID: " + std::to_string(pi.dwProcessId));
@@ -255,10 +363,10 @@ LaunchResult LaunchProtocolDirectly(const std::string& bcUrl) {
 }
 
 // =========================================================
-// Chrome Native Messaging 标准二进制应答函数
+// Native Messaging 标准二进制应答函数（沿用旧版）
 // =========================================================
 void SendNativeResponse(const std::string& jsonStr) {
-    WriteLog("发送响应给 Chrome: " + jsonStr);
+    WriteLog("发送响应给浏览器: " + jsonStr);
 
     (void)_setmode(_fileno(stdout), _O_BINARY);
 
@@ -268,22 +376,19 @@ void SendNativeResponse(const std::string& jsonStr) {
     std::cout.flush();
 }
 
-// 接收 json 对象并序列化输出给 Chrome
 void SendNativeResponseJson(const json& j) {
     SendNativeResponse(j.dump());
 }
 
-// 从标准输入 std::cin 读取 Chrome 传过来的 JSON 消息
 std::string ReadNativeMessage() {
     (void)_setmode(_fileno(stdin), _O_BINARY);
 
     uint32_t length = 0;
-    // 读取 4 字节 Little-Endian 消息长度
     if (!std::cin.read(reinterpret_cast<char*>(&length), sizeof(length))) {
         return "";
     }
 
-    if (length == 0 || length > 1024 * 1024) { // 限制最大 1MB 消息，防止异常
+    if (length == 0 || length > 1024 * 1024) {
         return "";
     }
 
@@ -313,10 +418,14 @@ std::string URLEncode(const std::string& str) {
 }
 
 int main(int argc, char* argv[]) {
-    // 判断是否由非 Chrome 唤醒（没有传入参数）
     if (argc <= 1) {
         std::wstring msg = L"This is a BitComet Native Messaging Host and cannot be run directly.\nVersion: ";
         msg += HOST_VERSION;
+
+        // 若判断配置开启了日志功能，动态追加 Logging enabled. 提示信息
+        if (IsLoggingEnabled()) {
+            msg += L"\n\nLogging enabled.";
+        }
 
         MessageBoxW(
             NULL,
@@ -329,11 +438,10 @@ int main(int argc, char* argv[]) {
 
     WriteLog("================ Host 进程启动 ================");
 
-    // 强制设置标准流模式
     (void)_setmode(_fileno(stdin), _O_BINARY);
     (void)_setmode(_fileno(stdout), _O_BINARY);
 
-    // 1. 读取来自 Chrome 的 Native Message JSON 消息
+    // 1. 读取 Native Message
     std::string jsonInput = ReadNativeMessage();
 
     if (jsonInput.empty()) {
@@ -341,9 +449,9 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    WriteLog("收到来自 Chrome 的原始 JSON: " + jsonInput);
+    WriteLog("收到来自浏览器的原始 JSON: " + jsonInput);
 
-    // 2. 解析 JSON 数据结构
+    // 2. 解析 JSON
     json jInput;
     try {
         jInput = json::parse(jsonInput);
@@ -357,7 +465,6 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // 提取字段 (使用 safe value 访问，支持默认值)
     std::string action = jInput.value("action", "");
     std::string fileUrl = jInput.value("link", "");
     std::string referer = jInput.value("referurl", jInput.value("referer", ""));
@@ -365,7 +472,7 @@ int main(int argc, char* argv[]) {
     std::string userAgent = jInput.value("user_agent", "");
     std::string taskName = jInput.value("name", "");
 
-    // 3. 处理预检请求 GetConfig
+    // 3. 处理 GetConfig 动作
     if (action == "GetConfig") {
         WriteLog("响应动作: GetConfig");
         std::string extList = GetBitCometExtensionList();
@@ -375,10 +482,9 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // 4. 处理打开客户端请求 Launch_Program
+    // 4. 处理 Launch_Program 动作
     if (action == "Launch_Program") {
         WriteLog("响应动作: Launch_Program");
-        // 传入空字符串，触发纯启动模式
         LaunchResult result = LaunchProtocolDirectly("");
         if (result == LAUNCH_ERR_REGISTRY) {
             SendNativeResponseJson({
@@ -423,7 +529,7 @@ int main(int argc, char* argv[]) {
     if (!encCook.empty()) bcUrl += "&cookie=" + encCook;
     if (!encUA.empty())   bcUrl += "&user_agent=" + encUA;
 
-    // 8. 唤起比特彗星 (带下载任务参数)
+    // 8. 唤起比特彗星
     LaunchResult result = LaunchProtocolDirectly(bcUrl);
     if (result == LAUNCH_ERR_REGISTRY) {
         SendNativeResponseJson({
@@ -438,7 +544,6 @@ int main(int argc, char* argv[]) {
             });
     }
     else {
-        // 9. 给 Chrome 返回成功响应
         SendNativeResponseJson({
             {"status", "ok"}
             });
