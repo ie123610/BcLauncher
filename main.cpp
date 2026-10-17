@@ -17,7 +17,7 @@
 using json = nlohmann::json;
 
 // 全局版本号定义
-const wchar_t* HOST_VERSION = L"1.2.7";
+const wchar_t* HOST_VERSION = L"1.2.7.0";
 
 // 官方预设默认扩展名列表（当 XML 节点缺失或文件不存在时使用）
 const std::string DEFAULT_EXT_LIST = ".mp4;.mkv;.asf;.avi;.mpg;.rm;.rmvb;.wmv;.mp3;.wma;.zip;.rar;.7z;.iso;.exe;.msi;.msix";
